@@ -101,6 +101,7 @@ namespace Unity.FPS.Gameplay
         public Vector3 CharacterVelocity { get; set; }
         public bool IsGrounded { get; private set; }
         public bool HasJumpedThisFrame { get; private set; }
+        public bool EnableDoubleJumpedThisFrame { get; private set; }
         public bool IsDead { get; private set; }
         public bool IsCrouching { get; private set; }
 
@@ -203,6 +204,15 @@ namespace Unity.FPS.Gameplay
                     // land SFX
                     AudioSource.PlayOneShot(LandSfx);
                 }
+
+                EnableDoubleJumpedThisFrame = false;
+            }
+
+            //falling
+            if (!IsGrounded && wasGrounded && !EnableDoubleJumpedThisFrame)
+            {
+                //If we detect that the player is 'falling' but hasn't jumped, we enable the double jump.
+                EnableDoubleJumpedThisFrame = true;
             }
 
             // crouching
@@ -336,6 +346,8 @@ namespace Unity.FPS.Gameplay
                             // Force grounding to false
                             IsGrounded = false;
                             m_GroundNormal = Vector3.up;
+
+                            EnableDoubleJumpedThisFrame = true;
                         }
                     }
 
@@ -354,6 +366,29 @@ namespace Unity.FPS.Gameplay
                 // handle air movement
                 else
                 {
+                    //Double jumping
+                    if (EnableDoubleJumpedThisFrame && m_InputHandler.GetJumpInputDown())
+                    {
+                        EnableDoubleJumpedThisFrame = false;
+
+                        // start by canceling out the vertical component of our velocity, but only if it's negative
+                        // We do this in order to make a double jump behave like a normal jump if the player is falling down
+                        // But as an aditive jump if the vertical momemtum is still in effect
+                        if(CharacterVelocity.y < 0f)
+                        {
+                            CharacterVelocity = new Vector3(CharacterVelocity.x, 0f, CharacterVelocity.z);
+                        }
+
+                        // then, add the jumpSpeed value upwards
+                        CharacterVelocity += Vector3.up * JumpForce;
+
+                        // play sound
+                        AudioSource.PlayOneShot(JumpSfx);
+
+                        // remember last time we jumped because we need to prevent snapping to ground for a short time
+                        m_LastTimeJumped = Time.time;
+                    }
+
                     // add air acceleration
                     CharacterVelocity += worldspaceMoveInput * AccelerationSpeedInAir * Time.deltaTime;
 
