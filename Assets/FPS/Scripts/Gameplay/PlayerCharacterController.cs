@@ -53,6 +53,14 @@ namespace Unity.FPS.Gameplay
         [Header("Jump")] [Tooltip("Force applied upward when jumping")]
         public float JumpForce = 9f;
 
+        [Header("Dash")]
+        [Tooltip("Force applied while dashing on the direction of the movement")]
+        public float DashForce = 25f;
+
+        [Header("AirDash")]
+        [Tooltip("Force applied while dashing in the air on the direction of the movement")]
+        public float AirDashForce = 15f;
+
         [Header("Stance")] [Tooltip("Ratio (0-1) of the character height where the camera will be at")]
         public float CameraHeightRatio = 0.9f;
 
@@ -102,6 +110,7 @@ namespace Unity.FPS.Gameplay
         public bool IsGrounded { get; private set; }
         public bool HasJumpedThisFrame { get; private set; }
         public bool EnableDoubleJumpedThisFrame { get; private set; }
+        public bool EnableDashedWhileJumpingThisFrame { get; private set; }
         public bool IsDead { get; private set; }
         public bool IsCrouching { get; private set; }
 
@@ -127,12 +136,17 @@ namespace Unity.FPS.Gameplay
         Vector3 m_CharacterVelocity;
         Vector3 m_LatestImpactSpeed;
         float m_LastTimeJumped = 0f;
+        float m_LastTimeDashed = 0f;
+        float m_LastTimeAirDashed = 0f;
         float m_CameraVerticalAngle = 0f;
         float m_FootstepDistanceCounter;
         float m_TargetCharacterHeight;
 
         const float k_JumpGroundingPreventionTime = 0.2f;
         const float k_GroundCheckDistanceInAir = 0.07f;
+        const float k_DashSpamingPreventionTime = 0.5f;
+        const float k_GroundDashTime = 0.15f;
+        const float k_AirDashTime = 0.15f;
 
         void Awake()
         {
@@ -206,6 +220,7 @@ namespace Unity.FPS.Gameplay
                 }
 
                 EnableDoubleJumpedThisFrame = false;
+                EnableDashedWhileJumpingThisFrame = false;
             }
 
             //falling
@@ -213,6 +228,9 @@ namespace Unity.FPS.Gameplay
             {
                 //If we detect that the player is 'falling' but hasn't jumped, we enable the double jump.
                 EnableDoubleJumpedThisFrame = true;
+
+                //we also enable air dash
+                EnableDashedWhileJumpingThisFrame = true;
             }
 
             // crouching
@@ -274,6 +292,27 @@ namespace Unity.FPS.Gameplay
             }
         }
 
+        //We use this to prevent spamming while on ground
+        bool CanDash()
+        {
+            if (IsCrouching || Time.time <= m_LastTimeDashed + k_DashSpamingPreventionTime)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        //We use this to simulate a continous accelerating of the dash mechanic. 
+        //Basically, if the character is 'dashing' the normal speed calculation is ignored.
+        bool IsDashing()
+        {
+            if(IsGrounded)
+                return Time.time < m_LastTimeDashed + k_GroundDashTime;
+
+
+            return Time.time < m_LastTimeAirDashed + k_AirDashTime;
+        }
+
         void HandleCharacterMovement()
         {
             // horizontal character rotation
@@ -317,12 +356,32 @@ namespace Unity.FPS.Gameplay
                     // reduce speed if crouching by crouch speed ratio
                     if (IsCrouching)
                         targetVelocity *= MaxSpeedCrouchedRatio;
+
                     targetVelocity = GetDirectionReorientedOnSlope(targetVelocity.normalized, m_GroundNormal) *
                                      targetVelocity.magnitude;
 
-                    // smoothly interpolate between our current velocity and the target velocity based on acceleration speed
-                    CharacterVelocity = Vector3.Lerp(CharacterVelocity, targetVelocity,
+
+                    if (!IsDashing())
+                    {
+                        // smoothly interpolate between our current velocity and the target velocity based on acceleration speed
+                        CharacterVelocity = Vector3.Lerp(CharacterVelocity, targetVelocity,
                         MovementSharpnessOnGround * Time.deltaTime);
+                    }
+
+                    //Dashing on the ground
+                    if (CanDash() && m_InputHandler.GetDashInputDown())
+                    {
+                        //We want this movement to be as snappy as posible, so firt, we cut all vertical movement
+                        CharacterVelocity = new Vector3(targetVelocity.x, 0f, targetVelocity.z);
+
+                        CharacterVelocity += CharacterVelocity.normalized * DashForce;
+
+                        // play sound
+                        AudioSource.PlayOneShot(JumpSfx);
+
+                        // remember last time we jumped because we need to prevent snapping to ground for a short time
+                        m_LastTimeDashed = Time.time;
+                    }
 
                     // jumping
                     if (IsGrounded && m_InputHandler.GetJumpInputDown())
@@ -348,6 +407,7 @@ namespace Unity.FPS.Gameplay
                             m_GroundNormal = Vector3.up;
 
                             EnableDoubleJumpedThisFrame = true;
+                            EnableDashedWhileJumpingThisFrame = true;
                         }
                     }
 
@@ -391,16 +451,34 @@ namespace Unity.FPS.Gameplay
 
                     // add air acceleration
                     CharacterVelocity += worldspaceMoveInput * AccelerationSpeedInAir * Time.deltaTime;
+                    if(!IsDashing())
+                    {
+                        // limit air speed to a maximum, but only horizontally
+                        float verticalVelocity = CharacterVelocity.y;
+                        Vector3 horizontalVelocity = Vector3.ProjectOnPlane(CharacterVelocity, Vector3.up);
+                        horizontalVelocity = Vector3.ClampMagnitude(horizontalVelocity, MaxSpeedInAir * speedModifier);
+                        CharacterVelocity = horizontalVelocity + (Vector3.up * verticalVelocity);
+                    }
 
-                    // limit air speed to a maximum, but only horizontally
-                    float verticalVelocity = CharacterVelocity.y;
-                    Vector3 horizontalVelocity = Vector3.ProjectOnPlane(CharacterVelocity, Vector3.up);
-                    horizontalVelocity = Vector3.ClampMagnitude(horizontalVelocity, MaxSpeedInAir * speedModifier);
-                    CharacterVelocity = horizontalVelocity + (Vector3.up * verticalVelocity);
+                    //Dashing on the air
+                    if (EnableDashedWhileJumpingThisFrame && m_InputHandler.GetDashInputDown())
+                    {
+                        EnableDashedWhileJumpingThisFrame = false;
+                        //We want this movement to be as snappy as posible, so firt, we cut all vertical movement
+                        CharacterVelocity = new Vector3(CharacterVelocity.x, 0f, CharacterVelocity.z);
+
+                        CharacterVelocity += CharacterVelocity.normalized * AirDashForce;
+
+                        // play sound
+                        AudioSource.PlayOneShot(JumpSfx);
+
+                        m_LastTimeAirDashed = Time.time;
+                    }
 
                     // apply the gravity to the velocity
                     CharacterVelocity += Vector3.down * GravityDownForce * Time.deltaTime;
                 }
+
             }
 
             // apply the final calculated velocity value as a character movement
